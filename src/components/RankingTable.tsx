@@ -6,6 +6,13 @@ import { Badge } from "@/components/ui/badge";
 import { ChevronUp, ChevronDown, Eye, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+// ── RMFL criterion breakdown entry ───────────────────────────────────────────
+export interface CriterionBreakdown {
+  learned_weight: number;
+  raw_score:      number;
+  contribution:   number;
+}
+
 // ── API response shape from /rank-cvs ────────────────────────────────────────
 export interface ApiCandidate {
   rank:                 number;
@@ -16,7 +23,7 @@ export interface ApiCandidate {
   cv_text:              string | null;
   raw_row:              Record<string, string> | null;
   category:             string;
-  area_of_interest:     string | null; // ← ADD
+  area_of_interest:     string | null;
   category_confidence:  number;
   semantic_match_pct:   number;
   tech_match_pct:       number;
@@ -26,19 +33,39 @@ export interface ApiCandidate {
   portfolio_type:       string | null;
   portfolio_summary:    string | null;
   portfolio_skills:     string[] | null;
+  // ── RMFL fields ────────────────────────────────────────────────────────────
+  criteria_scores:      Record<string, number>              | null;
+  learned_weights:      Record<string, number>              | null;
+  criteria_breakdown:   Record<string, CriterionBreakdown>  | null;
+  criteria_total:       number | null;
+  weight_entropy:       number | null;
+  // ── UI aliases ─────────────────────────────────────────────────────────────
   id?:    string;
   name?:  string;
   email?: string;
   phone?: string;
 }
 
-type SortKey = "rank" | "tech_match_pct" | "semantic_match_pct";
+type SortKey = "rank" | "tech_match_pct" | "semantic_match_pct" | "criteria_total";
 
 interface RankingTableProps {
   candidates: ApiCandidate[];
   jdTitle:    string;
   onDelete?:  (candidateId: string) => void;
 }
+
+// Human-readable labels for the 9 RMFL criteria keys
+const CRITERIA_LABELS: Record<string, string> = {
+  relevant_background:    "Background",
+  results_achievements:   "Results",
+  relevant_courses:       "Courses",
+  training_certification: "Certifications",
+  relevant_skills:        "Skills",
+  work_experience:        "Experience",
+  projects_coursework:    "Projects",
+  thesis_publications:    "Thesis / Research",
+  portfolio:              "Portfolio",
+};
 
 export function RankingTable({ candidates, jdTitle, onDelete }: RankingTableProps) {
   const [sortKey, setSortKey]     = useState<SortKey>("rank");
@@ -48,10 +75,9 @@ export function RankingTable({ candidates, jdTitle, onDelete }: RankingTableProp
   const [localList, setLocalList] = useState<ApiCandidate[]>(candidates);
   const [confirmId, setConfirmId] = useState<string | null>(null);
 
-  /**
-   * Resolve display name with full fallback chain:
-   * candidate_name → name alias → raw_row Name fields → email local-part → candidate_id
-   */
+  // Whether ANY candidate in the list has RMFL data — controls column visibility
+  const hasCriteriaData = localList.some((c) => c.criteria_total != null);
+
   const displayName = (c: ApiCandidate) => {
     if (c.candidate_name?.trim()) return c.candidate_name.trim();
     if (c.name?.trim() && c.name.trim() !== (c.candidate_email ?? "").trim()) return c.name.trim();
@@ -64,32 +90,17 @@ export function RankingTable({ candidates, jdTitle, onDelete }: RankingTableProp
     }
     if (c.candidate_email?.trim()) {
       const local = c.candidate_email.split("@")[0];
-      return local
-        .replace(/[._-]/g, " ")
-        .replace(/\b\w/g, (ch) => ch.toUpperCase());
+      return local.replace(/[._-]/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
     }
     return c.candidate_id;
   };
 
-  /**
-   * Resolve area_of_interest:
-   * 1. area_of_interest field (set by backend _get_field → FIELD_MAP["interest"])
-   * 2. raw_row fallback for common column name variants
-   */
   const displayAreaOfInterest = (c: ApiCandidate): string | null => {
     if (c.area_of_interest?.trim()) return c.area_of_interest.trim();
     if (c.raw_row) {
       const aoiKeys = [
-        "Area of Interest ",   // Google Form column (trailing space)
-        "Area of Interest",
-        "area_of_interest",
-        "AreaOfInterest",
-        "Interest",
-        "interest",
-        "Domain",
-        "domain",
-        "Field",
-        "field",
+        "Area of Interest ", "Area of Interest", "area_of_interest",
+        "AreaOfInterest", "Interest", "interest", "Domain", "domain", "Field", "field",
       ];
       for (const k of aoiKeys) {
         const v = c.raw_row[k]?.trim();
@@ -99,10 +110,8 @@ export function RankingTable({ candidates, jdTitle, onDelete }: RankingTableProp
     return null;
   };
 
-  const initials = (c: ApiCandidate) => {
-    const name = displayName(c);
-    return name.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase();
-  };
+  const initials = (c: ApiCandidate) =>
+    displayName(c).split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase();
 
   const handleDelete = (candidateId: string) => {
     setLocalList((prev) => prev.filter((c) => c.candidate_id !== candidateId));
@@ -122,8 +131,14 @@ export function RankingTable({ candidates, jdTitle, onDelete }: RankingTableProp
       );
     })
     .sort((a, b) => {
-      const av = a[sortKey] as number;
-      const bv = b[sortKey] as number;
+      let av: number, bv: number;
+      if (sortKey === "criteria_total") {
+        av = a.criteria_total ?? -1;
+        bv = b.criteria_total ?? -1;
+      } else {
+        av = a[sortKey] as number;
+        bv = b[sortKey] as number;
+      }
       return sortAsc ? av - bv : bv - av;
     });
 
@@ -195,6 +210,16 @@ export function RankingTable({ candidates, jdTitle, onDelete }: RankingTableProp
                       Semantic <SortIcon col="semantic_match_pct" />
                     </button>
                   </th>
+
+                  {/* RMFL Criteria column — only rendered when data is present */}
+                  {hasCriteriaData && (
+                    <th className="text-left px-4 py-3 font-semibold text-muted-foreground text-xs uppercase tracking-wide">
+                      <button className="flex items-center gap-1" onClick={() => toggleSort("criteria_total")}>
+                        Criteria Score <SortIcon col="criteria_total" />
+                      </button>
+                    </th>
+                  )}
+
                   <th className="text-left px-4 py-3 font-semibold text-muted-foreground text-xs uppercase tracking-wide">
                     Matched Skills
                   </th>
@@ -269,6 +294,37 @@ export function RankingTable({ candidates, jdTitle, onDelete }: RankingTableProp
                       <ScoreBadge score={c.semantic_match_pct} showBar />
                     </td>
 
+                    {/* RMFL Criteria total — mini bar + value */}
+                    {hasCriteriaData && (
+                      <td className="px-4 py-3">
+                        {c.criteria_total != null ? (
+                          <div className="flex flex-col gap-1 min-w-[80px]">
+                            <span className={cn(
+                              "text-xs font-semibold tabular-nums",
+                              c.criteria_total >= 70 ? "text-green-600 dark:text-green-400" :
+                              c.criteria_total >= 45 ? "text-amber-600 dark:text-amber-400" :
+                              "text-red-500 dark:text-red-400"
+                            )}>
+                              {c.criteria_total.toFixed(1)}
+                            </span>
+                            <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
+                              <div
+                                className={cn(
+                                  "h-full rounded-full transition-all",
+                                  c.criteria_total >= 70 ? "bg-green-500" :
+                                  c.criteria_total >= 45 ? "bg-amber-500" :
+                                  "bg-red-500"
+                                )}
+                                style={{ width: `${Math.min(c.criteria_total, 100)}%` }}
+                              />
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="text-[11px] text-muted-foreground">—</span>
+                        )}
+                      </td>
+                    )}
+
                     {/* Matched skills */}
                     <td className="px-4 py-3">
                       <div className="flex flex-wrap gap-1 max-w-[200px]">
@@ -338,3 +394,6 @@ export function RankingTable({ candidates, jdTitle, onDelete }: RankingTableProp
     </>
   );
 }
+
+// Export CRITERIA_LABELS so CandidateModal can reuse them
+export { CRITERIA_LABELS };

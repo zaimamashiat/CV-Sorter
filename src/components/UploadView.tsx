@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { rankCVs, extractJD } from "@/lib/api";
-import type { ApiRankingResponse } from "@/lib/types";
+import type { RankingResponse } from "@/lib/types";
 import {
   FileText, FileSpreadsheet, Globe,
   Loader2, AlertCircle, CheckCircle2, Plus, X,
@@ -9,25 +9,25 @@ import {
 
 type Props = {
   onSubmit: (payload: {
-    jdFiles:             File[];
-    cvFile:              File;
-    extractPortfolios:   boolean;
-    jdExtractedList:     Array<{ file: File; extracted: Record<string, any> }>;
-    ranking:             ApiRankingResponse;
-    areaOfInterestMap:   Record<string, string>;
+    jdFiles:           File[];
+    cvFile:            File;
+    extractPortfolios: boolean;
+    jdExtractedList:   Array<{ file: File; extracted: Record<string, any> }>;
+    ranking:           RankingResponse;
+    areaOfInterestMap: Record<string, string>;
   }) => void;
   onCancel?: () => void;
 };
 
 // ── CSV Area-of-Interest parser ──────────────────────────────────────────────
 async function parseAreaOfInterestFromCSV(file: File): Promise<Record<string, string>> {
-  const text = await file.text();
+  const text  = await file.text();
   const lines = text.split(/\r?\n/).filter(Boolean);
   if (lines.length < 2) return {};
 
   const parseLine = (line: string): string[] => {
     const result: string[] = [];
-    let current = "";
+    let current  = "";
     let inQuotes = false;
     for (let i = 0; i < line.length; i++) {
       const ch = line[i];
@@ -82,7 +82,7 @@ interface StageConfig {
 }
 
 const buildStages = (jdCount: number, withPortfolio: boolean): StageConfig[] => {
-  const base: StageConfig[] = [
+  const stages: StageConfig[] = [
     {
       key:      "extracting-jd",
       label:    jdCount > 1 ? `Extracting ${jdCount} job descriptions` : "Extracting job description",
@@ -93,32 +93,32 @@ const buildStages = (jdCount: number, withPortfolio: boolean): StageConfig[] => 
       key:      "ranking",
       label:    "Embedding & ranking candidates",
       sublabel: jdCount > 1
-        ? `BERT + SBERT across ${jdCount} JDs — sorting by best match...`
-        : "BERT + SBERT + fuzzy matching...",
+        ? `BERT + SBERT + RMFL across ${jdCount} JDs...`
+        : "BERT · SBERT · fuzzy matching · RMFL criteria scoring...",
       weight: withPortfolio ? 12 : 80,
     },
   ];
   if (withPortfolio) {
-    base.push({
+    stages.push({
       key:      "scraping-portfolios",
       label:    "Scraping portfolios",
       sublabel: "GitHub · LinkedIn · websites via LLaMA...",
       weight:   80,
     });
   }
-  return base;
+  return stages;
 };
 
 // ── Animated progress hook ───────────────────────────────────────────────────
 function useAnimatedProgress(
   stageIndex: number,
-  stages: StageConfig[],
-  done: boolean,
-  running: boolean,
+  stages:     StageConfig[],
+  done:       boolean,
+  running:    boolean,
   withPortfolio: boolean,
 ) {
   const [progress, setProgress] = useState(0);
-  const rafRef  = useRef<number>(0);
+  const rafRef   = useRef<number>(0);
   const startRef = useRef<number>(0);
 
   const totalWeight  = stages.reduce((s, st) => s + st.weight, 0);
@@ -130,18 +130,20 @@ function useAnimatedProgress(
   );
 
   useEffect(() => {
+    cancelAnimationFrame(rafRef.current);
+
     if (done)     { setProgress(100); return; }
     if (!running) { setProgress(0);   return; }
 
     const stageStart = stagePcts[stageIndex]    ?? 0;
     const stageEnd   = stageEndPcts[stageIndex] ?? 100;
-    const stageMax   = stageEnd - 3;
+    const stageMax   = stageEnd - 3; // leave a 3% gap so it never hits next stage early
 
     startRef.current = performance.now();
 
-    const BASE_DURATION = withPortfolio ? 180_000 : 30_000;
-    const stageWeight = stages[stageIndex]?.weight ?? 100;
-    const duration = (stageWeight / 100) * BASE_DURATION;
+    const BASE_DURATION  = withPortfolio ? 180_000 : 30_000;
+    const stageWeight    = stages[stageIndex]?.weight ?? 100;
+    const duration       = (stageWeight / totalWeight) * BASE_DURATION;
 
     const animate = (now: number) => {
       const elapsed = now - startRef.current;
@@ -154,6 +156,7 @@ function useAnimatedProgress(
 
     rafRef.current = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(rafRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stageIndex, done, running]);
 
   return progress;
@@ -162,17 +165,19 @@ function useAnimatedProgress(
 // ── Component ────────────────────────────────────────────────────────────────
 export function UploadView({ onSubmit, onCancel }: Props) {
   const [jdFiles, setJdFiles]                     = useState<File[]>([]);
-  const [cvFile, setCvFile]                       = useState<File | null>(null);
+  const [cvFile,  setCvFile]                      = useState<File | null>(null);
   const [extractPortfolios, setExtractPortfolios] = useState(false);
   const [stageIndex, setStageIndex]               = useState(0);
   const [isDone, setIsDone]                       = useState(false);
+  const [isRunning, setIsRunning]                 = useState(false);
   const [candidateCount, setCandidateCount]       = useState<number | null>(null);
   const [aoiDetected, setAoiDetected]             = useState<boolean | null>(null);
+  const [rmflSteps, setRmflSteps]                 = useState<number | null>(null);
 
   const stages       = buildStages(jdFiles.length || 1, extractPortfolios);
-  const [isRunning, setIsRunning] = useState(false);
   const progressLive = useAnimatedProgress(stageIndex, stages, isDone, isRunning, extractPortfolios);
 
+  // Detect AOI column whenever CV file changes
   useEffect(() => {
     if (!cvFile) { setAoiDetected(null); return; }
     parseAreaOfInterestFromCSV(cvFile).then((map) => {
@@ -195,35 +200,48 @@ export function UploadView({ onSubmit, onCancel }: Props) {
   const mutation = useMutation({
     mutationFn: async () => {
       if (jdFiles.length === 0) throw new Error("Please select at least one JD PDF");
-      if (!cvFile)              throw new Error("Please select a CV CSV");
+      if (!cvFile)              throw new Error("Please select a Candidates CSV");
 
+      // Reset state
       setIsRunning(true);
       setIsDone(false);
       setStageIndex(0);
       setCandidateCount(null);
+      setRmflSteps(null);
 
+      // ── Step 1: parse AOI from CSV ─────────────────────────────────────
       const areaOfInterestMap = await parseAreaOfInterestFromCSV(cvFile);
 
-      // Extract all JDs in parallel
-      const jdResults = await Promise.all(
+      // ── Step 2: extract all JDs in parallel ───────────────────────────
+      setStageIndex(0);
+      const jdExtractedList = await Promise.all(
         jdFiles.map(async (file) => {
           const resp = await extractJD(file);
           return { file, extracted: resp?.extracted ?? {} };
         })
       );
 
-      // Rank — pass all JDs; server merges/sorts by best match across JDs
+      // ── Step 3: rank candidates (server runs BERT+SBERT+RMFL) ─────────
       setStageIndex(1);
       if (extractPortfolios) setStageIndex(2);
 
-      // Pass the first JD file (API expects single jdFile)
-      const ranking = await rankCVsMulti({ jdFiles, cvFile, extractPortfolios });
+      // Always use the first JD file for the ranking call
+      // (multi-JD support can be added server-side later)
+      const ranking: RankingResponse = await rankCVs(
+        jdFiles[0],
+        cvFile,
+        extractPortfolios,
+      );
+
       setCandidateCount(ranking.total_candidates);
+      setRmflSteps(ranking.rmfl_update_steps ?? null);
 
       setIsDone(true);
       setIsRunning(false);
-      return { jdExtractedList: jdResults, ranking, areaOfInterestMap };
+
+      return { jdExtractedList, ranking, areaOfInterestMap };
     },
+
     onSuccess: ({ jdExtractedList, ranking, areaOfInterestMap }) => {
       if (!cvFile) return;
       onSubmit({
@@ -235,6 +253,7 @@ export function UploadView({ onSubmit, onCancel }: Props) {
         areaOfInterestMap,
       });
     },
+
     onError: () => {
       setIsRunning(false);
       setIsDone(false);
@@ -274,7 +293,7 @@ export function UploadView({ onSubmit, onCancel }: Props) {
 
       <div className="rounded-xl border bg-card shadow-card p-5 space-y-5">
 
-        {/* ── JD files (multi) ────────────────────────────────────────── */}
+        {/* ── JD files ────────────────────────────────────────────────── */}
         <div className="space-y-1.5">
           <label className="text-sm font-semibold text-foreground flex items-center gap-2">
             <FileText className="w-4 h-4 text-muted-foreground" />
@@ -286,7 +305,6 @@ export function UploadView({ onSubmit, onCancel }: Props) {
             )}
           </label>
 
-          {/* Drop zone / picker */}
           <label
             className={`flex items-center gap-2 w-full px-3 py-2 rounded-lg border border-dashed cursor-pointer transition-colors text-sm
               ${isPending ? "opacity-50 pointer-events-none" : "hover:bg-muted/40 hover:border-teal-400"}`}
@@ -305,7 +323,6 @@ export function UploadView({ onSubmit, onCancel }: Props) {
             />
           </label>
 
-          {/* File list */}
           {jdFiles.length > 0 && (
             <ul className="space-y-1">
               {jdFiles.map((f, i) => (
@@ -319,7 +336,7 @@ export function UploadView({ onSubmit, onCancel }: Props) {
                     <button
                       onClick={() => removeJd(i)}
                       className="text-muted-foreground hover:text-red-500 transition-colors"
-                      aria-label="Remove"
+                      aria-label="Remove JD"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
@@ -332,7 +349,7 @@ export function UploadView({ onSubmit, onCancel }: Props) {
           {jdFiles.length > 1 && (
             <p className="text-xs text-teal-600 flex items-center gap-1">
               <CheckCircle2 className="w-3 h-3" />
-              Candidates will be ranked &amp; sorted by their best match across all {jdFiles.length} JDs
+              Candidates ranked by best match across all {jdFiles.length} JDs
             </p>
           )}
         </div>
@@ -344,7 +361,9 @@ export function UploadView({ onSubmit, onCancel }: Props) {
             Candidates (CSV)
           </label>
           <input
-            type="file" accept=".csv,text/csv" disabled={isPending}
+            type="file"
+            accept=".csv,text/csv"
+            disabled={isPending}
             onChange={(e) => setCvFile(e.target.files?.[0] ?? null)}
             className="w-full text-sm file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-muted file:text-foreground hover:file:bg-muted/80 disabled:opacity-50"
           />
@@ -362,7 +381,7 @@ export function UploadView({ onSubmit, onCancel }: Props) {
               {aoiDetected === false && (
                 <p className="text-xs text-muted-foreground flex items-center gap-1">
                   <AlertCircle className="w-3 h-3" />
-                  No "Area of Interest" column found — add one to show it in results
+                  No "Area of Interest" column found
                 </p>
               )}
             </div>
@@ -371,10 +390,11 @@ export function UploadView({ onSubmit, onCancel }: Props) {
 
         {/* ── Portfolio toggle ─────────────────────────────────────────── */}
         <label className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer select-none transition-colors ${
-          extractPortfolios ? "bg-teal-50 border-teal-200" : "bg-muted/30 border-border"
+          extractPortfolios ? "bg-teal-50 border-teal-200 dark:bg-teal-950/20 dark:border-teal-800" : "bg-muted/30 border-border"
         } ${isPending ? "opacity-50 pointer-events-none" : ""}`}>
           <input
-            type="checkbox" checked={extractPortfolios}
+            type="checkbox"
+            checked={extractPortfolios}
             onChange={(e) => setExtractPortfolios(e.target.checked)}
             className="mt-0.5"
           />
@@ -395,12 +415,13 @@ export function UploadView({ onSubmit, onCancel }: Props) {
           disabled={isPending || jdFiles.length === 0 || !cvFile}
           className="w-full px-4 py-2.5 text-sm font-semibold rounded-lg teal-gradient text-white shadow-teal hover:opacity-90 disabled:opacity-60 transition-opacity flex items-center justify-center gap-2"
         >
-          {isPending
-            ? <><Loader2 className="w-4 h-4 animate-spin" /> Processing...</>
-            : jdFiles.length > 1
-              ? `Process & Rank Candidates Across ${jdFiles.length} JDs`
-              : "Process & Rank Candidates"
-          }
+          {isPending ? (
+            <><Loader2 className="w-4 h-4 animate-spin" /> Processing...</>
+          ) : jdFiles.length > 1 ? (
+            `Process & Rank Across ${jdFiles.length} JDs`
+          ) : (
+            "Process & Rank Candidates"
+          )}
         </button>
 
         {/* ── Progress UI ───────────────────────────────────────────────── */}
@@ -420,6 +441,7 @@ export function UploadView({ onSubmit, onCancel }: Props) {
               <p className="text-[11px] text-muted-foreground">{currentStage?.sublabel}</p>
             </div>
 
+            {/* Stage checklist */}
             <div className="rounded-lg bg-muted/40 border divide-y divide-border overflow-hidden">
               {stages.map((s, i) => {
                 const done   = i < stageIndex || isDone;
@@ -428,7 +450,7 @@ export function UploadView({ onSubmit, onCancel }: Props) {
                   <div
                     key={s.key}
                     className={`flex items-center gap-3 px-3 py-2.5 text-xs transition-colors ${
-                      done   ? "text-green-700 bg-green-50/60" :
+                      done   ? "text-green-700 bg-green-50/60 dark:text-green-400 dark:bg-green-950/20" :
                       active ? "text-foreground bg-background font-medium" :
                                "text-muted-foreground"
                     }`}
@@ -441,9 +463,15 @@ export function UploadView({ onSubmit, onCancel }: Props) {
                       <span className="w-3.5 h-3.5 rounded-full border border-muted-foreground/40 shrink-0 inline-block" />
                     )}
                     <span className="flex-1">{s.label}</span>
-                    {active && candidateCount !== null && (
+                    {/* Show live stats on the ranking stage once complete */}
+                    {done && s.key === "ranking" && candidateCount !== null && (
                       <span className="text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded-full">
                         {candidateCount} candidates
+                      </span>
+                    )}
+                    {done && s.key === "ranking" && rmflSteps !== null && (
+                      <span className="text-[10px] bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-400 px-1.5 py-0.5 rounded-full">
+                        RMFL step {rmflSteps}
                       </span>
                     )}
                   </div>
@@ -451,7 +479,7 @@ export function UploadView({ onSubmit, onCancel }: Props) {
               })}
             </div>
 
-            {extractPortfolios && stageIndex >= (stages.length - 1) && (
+            {extractPortfolios && stageIndex >= stages.length - 1 && !isDone && (
               <p className="text-[11px] text-muted-foreground text-center">
                 Portfolio scraping takes ~2 sec per URL — grab a coffee ☕
               </p>
@@ -461,7 +489,7 @@ export function UploadView({ onSubmit, onCancel }: Props) {
 
         {/* ── Error ────────────────────────────────────────────────────── */}
         {mutation.error && (
-          <div className="flex items-start gap-2 rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-700">
+          <div className="flex items-start gap-2 rounded-lg bg-red-50 border border-red-200 dark:bg-red-950/20 dark:border-red-800 p-3 text-xs text-red-700 dark:text-red-400">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <pre className="whitespace-pre-wrap font-sans">
               {(mutation.error as Error).message}
@@ -471,20 +499,4 @@ export function UploadView({ onSubmit, onCancel }: Props) {
       </div>
     </div>
   );
-}
-
-async function rankCVsMulti({
-  jdFiles,
-  cvFile,
-  extractPortfolios,
-}: {
-  jdFiles: File[];
-  cvFile: File;
-  extractPortfolios: boolean;
-}): Promise<ApiRankingResponse> {
-  return rankCVs(jdFiles[0], cvFile, extractPortfolios, {
-    jdFile: jdFiles[0],
-    cvFile,
-    extractPortfolios,
-  });
 }

@@ -1,4 +1,8 @@
-import type { ApiJDExtractResponse, ApiRankingResponse } from "./types";
+import type {
+  ApiJDExtractResponse,
+  RankingResponse,
+  HealthResponse,
+} from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 
@@ -12,7 +16,7 @@ async function mustJson<T>(res: Response): Promise<T> {
 
 export async function health() {
   const res = await fetch(`${API_BASE}/health`);
-  return mustJson<{ status: string; models_loaded: boolean }>(res);
+  return mustJson<HealthResponse>(res);
 }
 
 export async function extractJD(jdPdfFile: File) {
@@ -23,30 +27,16 @@ export async function extractJD(jdPdfFile: File) {
   return mustJson<ApiJDExtractResponse>(res);
 }
 
-export async function rankCVs(p0: File, cvFile: File, extractPortfolios: boolean, args: {
-  jdFile: File;
-  cvFile: File;
-  extractPortfolios: boolean;
-}) {
+export async function rankCVs(
+  jdFile:            File,
+  cvFile:            File,
+  extractPortfolios: boolean,
+) {
   const fd = new FormData();
-  fd.append("jd_file", args.jdFile);
-  fd.append("cv_file", args.cvFile);
-  fd.append("extract_portfolios", String(args.extractPortfolios));
+  fd.append("jd_file",            jdFile);
+  fd.append("cv_file",            cvFile);
+  fd.append("extract_portfolios", String(extractPortfolios));
 
   const res = await fetch(`${API_BASE}/rank-cvs`, { method: "POST", body: fd });
-  return mustJson<ApiRankingResponse>(res);
-}
-export async function rankCVsMulti(params: {
-  jdFiles: File[];
-  cvFile: File;
-  extractPortfolios: boolean;
-}) {
-  const form = new FormData();
-  params.jdFiles.forEach((f) => form.append("jd_files", f));  // name must match backend
-  form.append("cv_file", params.cvFile);
-  form.append("extract_portfolios", String(params.extractPortfolios));
-
-  const res = await fetch(`${API_BASE}/rank-cvs-multi`, { method: "POST", body: form });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  return mustJson<RankingResponse>(res);
 }
