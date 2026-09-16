@@ -16,6 +16,8 @@ import os
 import re
 import time
 import json
+import io
+import zipfile
 import tempfile
 from typing import List, Optional, Dict, Any, Tuple
 
@@ -52,6 +54,7 @@ import torch.optim as optim
 from torch.distributions import Categorical, Dirichlet
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import requests
 from bs4 import BeautifulSoup
@@ -140,11 +143,13 @@ app.add_middleware(
 # ══════════════════════════════════════════════
 # SBERT
 # ══════════════════════════════════════════════
-SBERT_MODEL_PATH = os.getenv(
-    "SBERT_MODEL_PATH",
-    r"C:\PROJECTS\models\sentence_trasnformers\trained_mpnet_resume"
+SBERT_MODEL_ID = os.getenv(
+    "SBERT_MODEL_ID",
+    "sentence-transformers/all-mpnet-base-v2",
 )
-sbert_model    = SentenceTransformer(SBERT_MODEL_PATH)
+# Download the public model from Hugging Face on first use, then reuse its
+# normal cache. This avoids a dependency on a machine-specific local path.
+sbert_model    = SentenceTransformer(SBERT_MODEL_ID)
 _sbert_out_dim = sbert_model.get_sentence_embedding_dimension()
 _sbert_reducer = nn.Linear(_sbert_out_dim, 384) if _sbert_out_dim != 384 else nn.Identity()
 _sbert_reducer.eval()
@@ -436,7 +441,7 @@ def get_models():
     bert      = AutoModelForSequenceClassification.from_pretrained("SwaKyxd/resume-analyser-bert")
     bert.eval()
 
-    print(f"Loading SBERT from: {SBERT_MODEL_PATH} (dim={_sbert_out_dim})...")
+    print(f"Loading SBERT from: {SBERT_MODEL_ID} (dim={_sbert_out_dim})...")
 
     ner = None
     if os.path.exists(NER_MODEL_PATH):
@@ -1091,6 +1096,82 @@ def extract_pdf_text(path: str) -> str:
             print(f"PyPDF2: {e}")
     return re.sub(r"\s+", " ", text).strip()
 
+
+_easyocr_reader = None
+
+
+def extract_resume_pdf_with_easyocr(path: str) -> str:
+    """Render a resume PDF and OCR every page with EasyOCR."""
+    global _easyocr_reader
+    try:
+        import easyocr
+        import fitz
+    except ImportError as exc:
+        raise RuntimeError(
+            "PDF resume OCR requires easyocr and pymupdf. "
+            "Install the packages in requirements.txt."
+        ) from exc
+
+    if _easyocr_reader is None:
+        # EasyOCR downloads its English recognition weights on first use.
+        _easyocr_reader = easyocr.Reader(["en"], gpu=torch.cuda.is_available())
+
+    pages: List[str] = []
+    document = fitz.open(path)
+    try:
+        for page in document:
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            image = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(
+                pixmap.height, pixmap.width, pixmap.n
+            )
+            page_lines = _easyocr_reader.readtext(
+                image, detail=0, paragraph=True
+            )
+            pages.append("\n".join(str(line) for line in page_lines))
+    finally:
+        document.close()
+
+    return re.sub(r"[ \t]+", " ", "\n".join(pages)).strip()
+
+
+def resume_text_to_record(text: str, filename: str) -> Dict[str, str]:
+    """Create fields expected by the ranking pipeline from OCR text."""
+    email_match = re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", text)
+    phone_match = re.search(r"(?<!\w)(?:\+?\d[\d ()-]{7,}\d)", text)
+    url_match = re.search(
+        r"(?:https?://|www\.)[^\s<>]+|(?:github|linkedin)\.com/[^\s<>]+",
+        text,
+        re.IGNORECASE,
+    )
+
+    name = ""
+    for raw_line in text.splitlines()[:12]:
+        line = raw_line.strip(" |-:,.")
+        words = line.split()
+        if (2 <= len(words) <= 5 and len(line) <= 80
+                and all(re.fullmatch(r"[A-Za-z][A-Za-z'.-]*", word) for word in words)
+                and not any(term in line.lower() for term in
+                            ("resume", "curriculum", "email", "phone", "address"))):
+            name = line
+            break
+
+    email = email_match.group(0) if email_match else ""
+    phone = phone_match.group(0).strip() if phone_match else ""
+    portfolio = url_match.group(0).rstrip(".,);]") if url_match else ""
+    if portfolio.startswith("www."):
+        portfolio = "https://" + portfolio
+
+    return {
+        "Candidate_ID": email or filename,
+        "Name": name or os.path.splitext(filename)[0].replace("_", " "),
+        "Email": email,
+        "Phone": phone,
+        "Resume Text": text,
+        "Skills": ", ".join(extract_skills_from_text(text)),
+        "Portfolio Link": portfolio,
+        "resume_file_name": filename,
+    }
+
 def read_word_resume(word_doc: str) -> Optional[str]:
     try:
         text = docx2txt.process(word_doc)
@@ -1381,6 +1462,40 @@ def load_models_route():
     return {"status": "Models and RMFL agent loaded successfully",
             "rmfl_steps": rmfl_agent.update_steps}
 
+
+@app.post("/convert-ats-cvs")
+async def convert_ats_cvs(file: UploadFile = File(...)):
+    """Convert every row in a candidate CSV into an ATS-friendly PDF."""
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(400, "Only CSV files are accepted")
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "The uploaded CSV is empty")
+    try:
+        from ats_converter import generate_ats_pdfs
+        generated = generate_ats_pdfs(content)
+    except (ImportError, OSError) as exc:
+        raise HTTPException(
+            503, "ATS PDF dependencies are unavailable. Install requirements.txt."
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        for filename, pdf_bytes in generated:
+            bundle.writestr(filename, pdf_bytes)
+    archive.seek(0)
+    headers = {
+        "Content-Disposition": 'attachment; filename="ats_cv_pdfs.zip"',
+        "X-Generated-Count": str(len(generated)),
+    }
+    return StreamingResponse(
+        archive,
+        media_type="application/zip",
+        headers=headers,
+    )
+
 @app.post("/extract-jd", response_model=JDExtractResponse)
 async def extract_jd(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
@@ -1407,7 +1522,8 @@ async def extract_portfolio_endpoint(url: str = Form(...)):
 @app.post("/rank-cvs", response_model=RankingResponse)
 async def rank_cvs(
     jd_file:            UploadFile = File(...),
-    cv_file:            UploadFile = File(...),
+    cv_file:            Optional[UploadFile] = File(None),
+    resume_files:       Optional[List[UploadFile]] = File(None),
     extract_portfolios: bool  = Form(False),
     semantic_weight:    float = Form(SEMANTIC_WEIGHT),
     tech_weight:        float = Form(TECH_WEIGHT),
@@ -1421,8 +1537,21 @@ async def rank_cvs(
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as jd_tmp:
         jd_tmp.write(await jd_file.read()); jd_path = jd_tmp.name
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as cv_tmp:
-        cv_tmp.write(await cv_file.read()); cv_path = cv_tmp.name
+    cv_path: Optional[str] = None
+    resume_paths: List[Tuple[str, str]] = []
+    if cv_file and cv_file.filename:
+        if not cv_file.filename.lower().endswith(".csv"):
+            raise HTTPException(400, "Candidate spreadsheet must be a CSV file")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as cv_tmp:
+            cv_tmp.write(await cv_file.read()); cv_path = cv_tmp.name
+    for resume_file in resume_files or []:
+        if not resume_file.filename or not resume_file.filename.lower().endswith(".pdf"):
+            raise HTTPException(400, "Only PDF resume files are accepted")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as resume_tmp:
+            resume_tmp.write(await resume_file.read())
+            resume_paths.append((resume_tmp.name, resume_file.filename))
+    if not cv_path and not resume_paths:
+        raise HTTPException(400, "Upload a Candidates CSV or at least one resume PDF")
 
     try:
         # ── 1. Extract JD ──────────────────────────────────────────────────
@@ -1437,7 +1566,25 @@ async def rank_cvs(
             jd_data.get("Job_Title",""), jd_data.get("Technology",""), jd_data.get("Skills","")]))
 
         # ── 2. Load CSV ────────────────────────────────────────────────────
-        df = pd.read_csv(cv_path).fillna("")
+        frames: List[pd.DataFrame] = []
+        if cv_path:
+            frames.append(pd.read_csv(cv_path).fillna(""))
+        if resume_paths:
+            ocr_records = []
+            for resume_path, original_name in resume_paths:
+                try:
+                    resume_text = extract_resume_pdf_with_easyocr(resume_path)
+                except Exception as exc:
+                    raise HTTPException(
+                        422, f"Could not OCR {original_name}: {exc}"
+                    ) from exc
+                if len(resume_text) < 20:
+                    raise HTTPException(
+                        422, f"EasyOCR could not find enough text in {original_name}"
+                    )
+                ocr_records.append(resume_text_to_record(resume_text, original_name))
+            frames.append(pd.DataFrame(ocr_records))
+        df = pd.concat(frames, ignore_index=True, sort=False).fillna("")
         skills_col = next(
             (c for opt in TECH_SKILLS_COLUMN_OPTIONS for c in [opt] if c in df.columns),
             next((c for c in df.columns
@@ -1654,8 +1801,13 @@ async def rank_cvs(
         }
 
     finally:
-        os.unlink(jd_path)
-        os.unlink(cv_path)
+        if os.path.exists(jd_path):
+            os.unlink(jd_path)
+        if cv_path and os.path.exists(cv_path):
+            os.unlink(cv_path)
+        for resume_path, _ in resume_paths:
+            if os.path.exists(resume_path):
+                os.unlink(resume_path)
 
 
 @app.post("/feedback",

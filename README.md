@@ -13,6 +13,8 @@ An end-to-end recruitment screening system that ranks candidates from a Google F
   - **SBERT** (`all-mpnet-base-v2`) for semantic similarity between JD and candidate profile
   - **RapidFuzz** for fuzzy skill matching with configurable threshold
 - **Portfolio Scraping** *(optional)* — Fetches GitHub repos, LinkedIn pages, and personal websites; uses LLaMA to summarise and extract additional skills
+- **PDF Resume OCR** — Upload one or more resume PDFs; EasyOCR extracts candidate details for JD matching
+- **ATS CV Converter** — Convert candidate CSV exports into clean, searchable ATS PDFs
 - **Live Dashboard** — React frontend with candidate rankings table, JD management, analytics charts, and candidate detail modals
 
 ---
@@ -212,7 +214,7 @@ If portfolio scraping is enabled, skills detected from GitHub/LinkedIn/websites 
 | **Job Descriptions** | Card grid of all uploaded JDs |
 | **Candidates** | Full rankings table with JD filter pills |
 | **Analytics** | Charts: avg tech match by JD, score distribution, category pie, skill gap analysis, radar profile |
-| **Upload** | JD PDF + CSV upload with animated progress bar and stage tracker |
+| **Upload** | JD PDF plus candidate CSV and/or EasyOCR resume PDFs, with animated progress and stage tracking |
 
 ---
 
@@ -249,7 +251,7 @@ Fuzzy matching threshold (default 80) can be changed per-request via the `/skill
 | ML — Embeddings | SBERT (`all-mpnet-base-v2`) via sentence-transformers |
 | ML — Skill Matching | RapidFuzz |
 | LLM | LLaMA 3.1 8B Instant via Groq API |
-| PDF Parsing | pdfplumber, PyPDF2 |
+| PDF Parsing / OCR | pdfplumber, PyPDF2, PyMuPDF, EasyOCR |
 | Web Scraping | requests, BeautifulSoup4 |
 | Frontend | React, TypeScript, Vite |
 | UI Components | shadcn/ui, Tailwind CSS |

@@ -9,6 +9,7 @@ import {
   Settings,
   ChevronRight,
   Brain,
+  FileCheck2,
 } from "lucide-react";
 
 interface SidebarProps {
@@ -22,6 +23,7 @@ const navItems = [
   { id: "candidates", label: "Candidates", icon: Users },
   { id: "analytics", label: "Analytics", icon: BarChart2 },
   { id: "upload", label: "Upload Files", icon: Upload },
+  { id: "ats", label: "ATS Converter", icon: FileCheck2 },
 ];
 
 export function Sidebar({ activeView, onNavigate }: SidebarProps) {

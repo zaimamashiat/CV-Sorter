@@ -29,10 +29,11 @@ import { JDCard } from "@/components/JDCard";
 import { RankingTable } from "@/components/RankingTable";
 import { AnalyticsView } from "@/components/AnalyticsView";
 import { UploadView } from "@/components/UploadView";
+import { AtsConverterView } from "@/components/AtsConverterView";
 import { Bell, Search, Download, Trash2 } from "lucide-react";
 import type { ApiCVRankEntry, UIJD, UICandidate } from "@/lib/types";
 
-type View = "dashboard" | "jds" | "candidates" | "analytics" | "upload" | "settings";
+type View = "dashboard" | "jds" | "candidates" | "analytics" | "upload" | "ats" | "settings";
 
 function mapApiCandidatesToTable(
   entries: ApiCVRankEntry[],
@@ -714,6 +715,8 @@ export default function Index() {
           {/* ══════════════════════════════════════════════════════════════════
               SETTINGS VIEW
           ══════════════════════════════════════════════════════════════════ */}
+          {activeView === "ats" && <AtsConverterView />}
+
           {activeView === "settings" && (
             <div className="space-y-4 max-w-xl">
               <h2 className="text-xl font-bold text-foreground">Settings</h2>

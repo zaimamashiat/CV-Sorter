@@ -7,6 +7,10 @@ sentence-transformers
 spacy
 pdfplumber
 PyPDF2
+pymupdf
+easyocr
+reportlab
+numpy
 python-docx
 docx2txt
 pyresparser

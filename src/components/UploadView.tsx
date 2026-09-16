@@ -10,7 +10,8 @@ import {
 type Props = {
   onSubmit: (payload: {
     jdFiles:           File[];
-    cvFile:            File;
+    cvFile:            File | null;
+    resumeFiles:       File[];
     extractPortfolios: boolean;
     jdExtractedList:   Array<{ file: File; extracted: Record<string, any> }>;
     ranking:           RankingResponse;
@@ -166,6 +167,7 @@ function useAnimatedProgress(
 export function UploadView({ onSubmit, onCancel }: Props) {
   const [jdFiles, setJdFiles]                     = useState<File[]>([]);
   const [cvFile,  setCvFile]                      = useState<File | null>(null);
+  const [resumeFiles, setResumeFiles]              = useState<File[]>([]);
   const [extractPortfolios, setExtractPortfolios] = useState(false);
   const [stageIndex, setStageIndex]               = useState(0);
   const [isDone, setIsDone]                       = useState(false);
@@ -197,10 +199,23 @@ export function UploadView({ onSubmit, onCancel }: Props) {
   const removeJd = (index: number) =>
     setJdFiles((prev) => prev.filter((_, i) => i !== index));
 
+  const addResumeFiles = (incoming: FileList | null) => {
+    if (!incoming) return;
+    const pdfs = Array.from(incoming).filter(
+      (file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")
+    );
+    setResumeFiles((prev) => {
+      const names = new Set(prev.map((file) => file.name));
+      return [...prev, ...pdfs.filter((file) => !names.has(file.name))];
+    });
+  };
+
   const mutation = useMutation({
     mutationFn: async () => {
       if (jdFiles.length === 0) throw new Error("Please select at least one JD PDF");
-      if (!cvFile)              throw new Error("Please select a Candidates CSV");
+      if (!cvFile && resumeFiles.length === 0) {
+        throw new Error("Please select a Candidates CSV or at least one resume PDF");
+      }
 
       // Reset state
       setIsRunning(true);
@@ -210,7 +225,9 @@ export function UploadView({ onSubmit, onCancel }: Props) {
       setRmflSteps(null);
 
       // ── Step 1: parse AOI from CSV ─────────────────────────────────────
-      const areaOfInterestMap = await parseAreaOfInterestFromCSV(cvFile);
+      const areaOfInterestMap = cvFile
+        ? await parseAreaOfInterestFromCSV(cvFile)
+        : {};
 
       // ── Step 2: extract all JDs in parallel ───────────────────────────
       setStageIndex(0);
@@ -230,6 +247,7 @@ export function UploadView({ onSubmit, onCancel }: Props) {
       const ranking: RankingResponse = await rankCVs(
         jdFiles[0],
         cvFile,
+        resumeFiles,
         extractPortfolios,
       );
 
@@ -243,10 +261,10 @@ export function UploadView({ onSubmit, onCancel }: Props) {
     },
 
     onSuccess: ({ jdExtractedList, ranking, areaOfInterestMap }) => {
-      if (!cvFile) return;
       onSubmit({
         jdFiles,
         cvFile,
+        resumeFiles,
         extractPortfolios,
         jdExtractedList,
         ranking,
@@ -277,7 +295,7 @@ export function UploadView({ onSubmit, onCancel }: Props) {
         <div>
           <h2 className="text-xl font-bold text-foreground">Upload &amp; Rank</h2>
           <p className="text-sm text-muted-foreground">
-            Upload one or more JD PDFs and a candidates CSV to generate AI-powered rankings
+            Upload JD PDFs, then add candidates from a CSV and/or resume PDFs
           </p>
         </div>
         {onCancel && (
@@ -389,6 +407,60 @@ export function UploadView({ onSubmit, onCancel }: Props) {
         </div>
 
         {/* ── Portfolio toggle ─────────────────────────────────────────── */}
+        <div className="space-y-1.5">
+          <label className="text-sm font-semibold text-foreground flex items-center gap-2">
+            <FileText className="w-4 h-4 text-muted-foreground" />
+            Candidate Resumes (PDF)
+            {resumeFiles.length > 0 && (
+              <span className="ml-auto text-xs font-normal bg-teal-100 text-teal-700 px-2 py-0.5 rounded-full">
+                {resumeFiles.length} file{resumeFiles.length > 1 ? "s" : ""} added
+              </span>
+            )}
+          </label>
+          <p className="text-xs text-muted-foreground">
+            Each PDF is scanned with EasyOCR and its contact details, skills, and resume text are matched against the JD.
+          </p>
+          <label className={`flex items-center gap-2 w-full px-3 py-2 rounded-lg border border-dashed cursor-pointer transition-colors text-sm ${
+            isPending ? "opacity-50 pointer-events-none" : "hover:bg-muted/40 hover:border-teal-400"
+          }`}>
+            <Plus className="w-4 h-4 text-muted-foreground shrink-0" />
+            <span className="text-muted-foreground">
+              {resumeFiles.length === 0 ? "Select one or more resume PDFs" : "Add more resume PDFs"}
+            </span>
+            <input
+              type="file"
+              accept="application/pdf,.pdf"
+              multiple
+              disabled={isPending}
+              className="hidden"
+              onChange={(event) => addResumeFiles(event.target.files)}
+            />
+          </label>
+          {resumeFiles.length > 0 && (
+            <ul className="space-y-1">
+              {resumeFiles.map((file, index) => (
+                <li
+                  key={`${file.name}-${index}`}
+                  className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/30 rounded-lg px-3 py-1.5"
+                >
+                  <CheckCircle2 className="w-3 h-3 text-green-500 shrink-0" />
+                  <span className="flex-1 truncate">{file.name}</span>
+                  {!isPending && (
+                    <button
+                      type="button"
+                      onClick={() => setResumeFiles((prev) => prev.filter((_, i) => i !== index))}
+                      className="text-muted-foreground hover:text-red-500 transition-colors"
+                      aria-label="Remove resume"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
         <label className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer select-none transition-colors ${
           extractPortfolios ? "bg-teal-50 border-teal-200 dark:bg-teal-950/20 dark:border-teal-800" : "bg-muted/30 border-border"
         } ${isPending ? "opacity-50 pointer-events-none" : ""}`}>
@@ -412,7 +484,7 @@ export function UploadView({ onSubmit, onCancel }: Props) {
         {/* ── Submit ───────────────────────────────────────────────────── */}
         <button
           onClick={() => mutation.mutate()}
-          disabled={isPending || jdFiles.length === 0 || !cvFile}
+          disabled={isPending || jdFiles.length === 0 || (!cvFile && resumeFiles.length === 0)}
           className="w-full px-4 py-2.5 text-sm font-semibold rounded-lg teal-gradient text-white shadow-teal hover:opacity-90 disabled:opacity-60 transition-opacity flex items-center justify-center gap-2"
         >
           {isPending ? (
