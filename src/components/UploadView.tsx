@@ -289,11 +289,11 @@ export function UploadView({ onSubmit, onCancel }: Props) {
                "bg-green-500";
 
   return (
-    <div className="space-y-4 max-w-2xl">
+    <div className="w-full max-w-4xl mx-auto space-y-6 py-4 md:py-8">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold text-foreground">Upload &amp; Rank</h2>
+          <h2 className="text-2xl font-bold text-foreground">Upload &amp; Rank</h2>
           <p className="text-sm text-muted-foreground">
             Upload JD PDFs, then add candidates from a CSV and/or resume PDFs
           </p>
@@ -309,7 +309,7 @@ export function UploadView({ onSubmit, onCancel }: Props) {
         )}
       </div>
 
-      <div className="rounded-xl border bg-card shadow-card p-5 space-y-5">
+      <div className="rounded-2xl border bg-card shadow-card p-6 md:p-8 space-y-6">
 
         {/* ── JD files ────────────────────────────────────────────────── */}
         <div className="space-y-1.5">

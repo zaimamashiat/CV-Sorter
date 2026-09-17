@@ -3,7 +3,7 @@ import { SkillTag } from "./SkillTag";
 import { Badge } from "@/components/ui/badge";
 import {
   Mail, Phone, ExternalLink, Award, Brain,
-  Github, Globe, Linkedin, TrendingUp, Star, BarChart2
+  Github, Globe, Linkedin, TrendingUp, Star, BarChart2, AlertTriangle
 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
@@ -61,10 +61,7 @@ function ScoreBar({ score, label, weight }: { score: number; label: string; weig
 
 export function CandidateModal({ candidate, jdTitle, onClose }: CandidateModalProps) {
   const hasCriteria = !!(candidate?.criteria_scores && candidate?.criteria_total != null);
-  const hasPortfolio = !!(
-    candidate?.portfolio_url &&
-    (candidate?.portfolio_summary || (candidate?.portfolio_skills?.length ?? 0) > 0)
-  );
+  const hasPortfolio = !!candidate?.portfolio_url;
 
   // Available tabs depend on what data is present
   type Tab = "cv" | "criteria" | "portfolio";
@@ -384,6 +381,19 @@ export function CandidateModal({ candidate, jdTitle, onClose }: CandidateModalPr
                   Open <ExternalLink className="w-3 h-3" />
                 </a>
               </div>
+
+              {!candidate.portfolio_summary && (candidate.portfolio_skills?.length ?? 0) === 0 && (
+                <div className="rounded-xl border border-red-200 bg-red-50 p-4 dark:border-red-900 dark:bg-red-950/30">
+                  <p className="flex items-center gap-2 text-sm font-semibold text-red-700 dark:text-red-300">
+                    <AlertTriangle className="w-4 h-4" />
+                    Empty portfolio output — human review required
+                  </p>
+                  <p className="mt-1.5 text-xs text-red-700/80 dark:text-red-300/80">
+                    {candidate.portfolio_error ||
+                      "The portfolio URL was available, but no summary or technical skills could be extracted. Open the original link above to review it manually."}
+                  </p>
+                </div>
+              )}
 
               {candidate.portfolio_summary && (
                 <div>

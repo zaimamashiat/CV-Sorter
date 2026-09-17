@@ -43,6 +43,8 @@ export interface ApiCVRankEntry {
   portfolio_type:       string | null;
   portfolio_summary:    string | null;
   portfolio_skills:     string[] | null;
+  portfolio_status:     "generated" | "empty" | "not_processed" | "not_provided";
+  portfolio_error:      string | null;
   // ── RMFL fields (present when backend v3.0+ is used) ──────────────────────
   criteria_scores:      Record<string, number>             | null;
   learned_weights:      Record<string, number>             | null;

@@ -112,7 +112,7 @@ function downloadCandidatesCSV(candidates: UICandidate[], jdTitle: string) {
     "Category",
     "Tech Match (%)", "Semantic Match (%)",
     ...(hasCriteria ? ["Criteria Total (RMFL)"] : []),
-    "Matched Skills", "Missing Skills", "Portfolio URL",
+    "Matched Skills", "Missing Skills", "Portfolio URL", "Portfolio Output", "Portfolio Error",
   ];
 
   const escape = (val: unknown) => {
@@ -134,6 +134,8 @@ function downloadCandidatesCSV(candidates: UICandidate[], jdTitle: string) {
     escape((c.matched_skills ?? []).join("; ")),
     escape((c.missing_skills ?? []).join("; ")),
     escape(c.portfolio_url ?? ""),
+    escape(c.portfolio_status ?? ""),
+    escape(c.portfolio_error ?? ""),
   ]);
 
   const csvContent = [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
@@ -164,7 +166,7 @@ function buildAnalyticsData(
   if (!allCandidates.length) return null;
 
   const techSource = selectedJD ?? jds[0];
-  const jd_skills  = techSource?.Technology
+  const extractedJdSkills = techSource?.Technology
     ? techSource.Technology.split(",").map((s) => s.trim()).filter(Boolean)
     : [];
 
@@ -177,12 +179,15 @@ function buildAnalyticsData(
     category_confidence: c.category_confidence ?? 0,
     semantic_match_pct:  c.semantic_match_pct ?? 0,
     tech_match_pct:      c.tech_match_pct ?? 0,
+    total_score:         c.total_score ?? 0,
     matched_skills:      c.matched_skills ?? [],
     missing_skills:      c.missing_skills ?? [],
     portfolio_url:       c.portfolio_url,
     portfolio_type:      c.portfolio_type,
     portfolio_summary:   c.portfolio_summary,
     portfolio_skills:    c.portfolio_skills,
+    portfolio_status:    c.portfolio_status,
+    portfolio_error:     c.portfolio_error,
     // ── RMFL fields forwarded to AnalyticsView ──────────────────────────
     criteria_scores:     c.criteria_scores    ?? null,
     learned_weights:     c.learned_weights    ?? null,
@@ -191,7 +196,15 @@ function buildAnalyticsData(
     weight_entropy:      c.weight_entropy     ?? null,
   }));
 
-  const portfolios_scraped = rankings.filter((r) => r.portfolio_url).length;
+  const portfolios_scraped = rankings.filter((r) =>
+    r.portfolio_status === "generated" || r.portfolio_status === "empty"
+  ).length;
+  const jd_skills = extractedJdSkills.length > 0
+    ? extractedJdSkills
+    : Array.from(new Set(rankings.flatMap((r) => [
+        ...(r.matched_skills ?? []),
+        ...(r.missing_skills ?? []),
+      ]))).filter(Boolean);
 
   return {
     jd_title:           selectedJD?.Job_Title ?? (jds.length > 1 ? "All JDs" : jds[0]?.Job_Title),

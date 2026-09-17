@@ -14,8 +14,10 @@ The project also includes an ATS converter that turns candidate CSV rows into cl
 - Semantic matching with sentence-transformers/all-mpnet-base-v2.
 - Fuzzy skill matching and structured keyword scoring.
 - Nine-criterion RMFL scoring with learned role-specific weights.
-- Optional GitHub, LinkedIn, and personal-site portfolio enrichment.
+- Optional GitHub, LinkedIn, and personal-site portfolio enrichment. GitHub profiles are enriched from every accessible public repository README and reduced into one combined profile summary.
+- Candidate rankings show whether portfolio output was generated, empty and requiring human review, not processed, or not provided; empty results retain a direct link and extraction error for manual checking.
 - Dashboard, candidate details, JD management, and analytics.
+- Pipeline Analytics includes total-score leaders, match distributions, skill coverage, category mix, portfolio-output health, and a direct human-review queue for empty portfolio results.
 - ATS PDF batch generation from candidate CSV data.
 - Hiring-feedback endpoints for updating and auditing the RMFL policy.
 
@@ -43,9 +45,11 @@ talent-match/
 ## Processing flow
 
 ~~~text
-JD PDF ---------------------------> PDF text extraction -> Groq structured JD
-Candidate CSV --------------------+Resume PDFs -> PyMuPDF -> EasyOCR ---> normalized candidate records
-Portfolio URLs -> web/GitHub --------> optional skill enrichment
+JD PDF ------------------------------> PDF text extraction -> Groq structured JD
+
+Candidate CSV -----------------------+
+Resume PDFs -> PyMuPDF -> EasyOCR ---+--> normalized candidate records
+Portfolio URLs -> web/GitHub --------+--> optional skill enrichment
 
 JD + candidates
     -> BERT category classification
@@ -67,9 +71,19 @@ Candidate CSV -> header mapping -> ATS sections -> ReportLab PDFs -> ZIP downloa
 - Python 3.10 or newer. Python 3.13 is used by the current local environment.
 - Node.js 18 or newer.
 - Internet access for first-time model downloads.
-- A Groq API key for JD extraction, ranking, search, model preloading, and portfolio analysis.
+- A Groq API key for JD extraction.
+- Ollama running locally with `qwen2.5:7b` for portfolio and GitHub README analysis.
 
 The ATS converter does not call Groq, but the FastAPI application initializes the SBERT model when the server starts.
+
+Install and prepare the default local portfolio model:
+
+~~~powershell
+ollama pull qwen2.5:7b
+ollama list
+~~~
+
+The Ollama desktop application normally starts the local service automatically. If it is not running, start it with `ollama serve` before launching the backend.
 
 ## Installation
 
@@ -121,6 +135,9 @@ Optional backend variables:
 |---|---|---|
 | SBERT_MODEL_ID | sentence-transformers/all-mpnet-base-v2 | Hugging Face model ID or compatible model location |
 | NER_MODEL_PATH | C:\PROJECTS\models\ner | Optional spaCy NER model directory |
+| GROQ_MODEL | openai/gpt-oss-20b | Groq model for JD extraction |
+| OLLAMA_BASE_URL | http://127.0.0.1:11434 | Local Ollama API used for portfolio analysis |
+| OLLAMA_MODEL | qwen2.5:7b | Installed Ollama model for portfolio and GitHub README summaries |
 
 The NER model is optional. The backend logs a warning and continues without NER enrichment when the directory does not exist.
 
@@ -417,7 +434,8 @@ Model downloads and initialization may take several minutes on the first run. La
 - Results persist in browser localStorage instead of a database.
 - The frontend accepts multiple JD PDFs, but ranking currently uses only the first.
 - EasyOCR is configured for English only.
-- Portfolio scraping is sequential and can be slow.
+- Portfolio scraping is sequential and can be slow. GitHub extraction uses the unauthenticated public API only, so GitHub rate limits may affect very large batches.
+- Local portfolio summarization requires Ollama to remain running and can be slower without GPU acceleration.
 - LinkedIn commonly blocks automated scraping.
 - ATS conversion requires recognizable CSV headers and does not parse arbitrary existing DOCX/PDF layouts.
 - SBERT initializes during backend import, including for non-ranking routes.
@@ -433,7 +451,7 @@ Model downloads and initialization may take several minutes on the first run. La
 | OCR and PDF parsing | EasyOCR, PyMuPDF, pdfplumber, PyPDF2 |
 | ATS PDF generation | ReportLab |
 | Ranking | PyTorch, RapidFuzz, RMFL policy |
-| LLM | Groq API, LLaMA 3.1 8B Instant |
+| LLM | Groq for JD extraction; local Ollama with Qwen 2.5 7B for portfolios |
 | Data processing | pandas, NumPy, scikit-learn, NLTK, Gensim |
 | Portfolio extraction | requests, BeautifulSoup |
 | Frontend | React, TypeScript, Vite |

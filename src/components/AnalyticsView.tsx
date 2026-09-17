@@ -15,12 +15,16 @@ interface CVRankEntry {
   category_confidence: number;
   semantic_match_pct: number;
   tech_match_pct: number;
+  total_score?: number;
+  criteria_total?: number | null;
   matched_skills: string[];
   missing_skills: string[];
   portfolio_url?: string;
   portfolio_type?: string;
   portfolio_summary?: string;
   portfolio_skills?: string[];
+  portfolio_status?: "generated" | "empty" | "not_processed" | "not_provided";
+  portfolio_error?: string;
 }
 
 interface RankingResponse {
@@ -126,8 +130,16 @@ export function AnalyticsView({ rankingData }: { rankingData?: RankingResponse }
     );
   }
 
-  const { rankings, jd_skills, jd_title, total_candidates, portfolios_scraped,
-          semantic_weight, tech_weight } = data;
+  const { rankings = [], jd_skills = [], jd_title, total_candidates } = data;
+
+  if (!rankings.length) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 gap-2 text-center">
+        <p className="text-sm font-medium text-foreground">No candidate results to analyze</p>
+        <p className="text-xs text-muted-foreground">Run a ranking with at least one candidate.</p>
+      </div>
+    );
+  }
 
   // ── Derived metrics ──────────────────────────────────────────────────────
 
@@ -163,13 +175,21 @@ export function AnalyticsView({ rankingData }: { rankingData?: RankingResponse }
     { metric: "Cat. Fit",      value: avg(r => r.category_confidence * 100) },
   ];
 
+  const candidateTotalScore = (r: CVRankEntry) => {
+    if (r.total_score != null) return r.total_score;
+    if (r.criteria_total != null) {
+      return 0.5 * r.criteria_total + 0.3 * r.semantic_match_pct + 0.2 * r.tech_match_pct;
+    }
+    return 0.5 * r.semantic_match_pct + 0.5 * r.tech_match_pct;
+  };
+
   // 4. Top 8 candidates by total score
   const top8 = [...rankings]
+    .sort((a, b) => candidateTotalScore(b) - candidateTotalScore(a))
     .slice(0, 8)
     .map(r => ({
       name: (r.candidate_name || r.candidate_email || r.candidate_id).split(" ")[0],
-      tech:  parseFloat(r.tech_match_pct.toFixed(1)),
-      sem:   parseFloat(r.semantic_match_pct.toFixed(1)),
+      total: parseFloat(candidateTotalScore(r).toFixed(1)),
     }));
 
   // 5. JD skill coverage: how many candidates matched each skill
@@ -189,11 +209,27 @@ export function AnalyticsView({ rankingData }: { rankingData?: RankingResponse }
   }));
 
   // 7. Summary stats
-  const avgTech = avg(r => r.tech_match_pct);
-  const avgSem  = avg(r => r.semantic_match_pct);
-  const portPct  = total_candidates > 0
-    ? Math.round((portfolios_scraped / total_candidates) * 100)
-    : 0;
+  const avgTech  = avg(r => r.tech_match_pct);
+  const avgSem   = avg(r => r.semantic_match_pct);
+  const avgTotal = avg(candidateTotalScore);
+
+  const getPortfolioStatus = (r: CVRankEntry) => {
+    if (r.portfolio_status) return r.portfolio_status;
+    if (!r.portfolio_url) return "not_provided";
+    return r.portfolio_summary || (r.portfolio_skills?.length ?? 0) > 0
+      ? "generated"
+      : "empty";
+  };
+  const portfolioStatusData = [
+    { name: "Generated", value: rankings.filter(r => getPortfolioStatus(r) === "generated").length },
+    { name: "Empty - Review", value: rankings.filter(r => getPortfolioStatus(r) === "empty").length },
+    { name: "Not processed", value: rankings.filter(r => getPortfolioStatus(r) === "not_processed").length },
+    { name: "Not provided", value: rankings.filter(r => getPortfolioStatus(r) === "not_provided").length },
+  ];
+  const generatedPortfolios = portfolioStatusData[0].value;
+  const reviewRequired = portfolioStatusData[1].value;
+  const portfolioStatusColors = ["#10b981", "#ef4444", "#f59e0b", "#94a3b8"];
+  const reviewQueue = rankings.filter(r => getPortfolioStatus(r) === "empty");
 
   // ── Render ───────────────────────────────────────────────────────────────
   return (
@@ -203,16 +239,21 @@ export function AnalyticsView({ rankingData }: { rankingData?: RankingResponse }
         <h2 className="text-xl font-bold text-foreground">Pipeline Analytics</h2>
         <p className="text-sm text-muted-foreground">
           {jd_title ? `Role: ${jd_title} · ` : ""}
-          {total_candidates} candidates · weights {Math.round(semantic_weight * 100)}% semantic / {Math.round(tech_weight * 100)}% tech
+          {total_candidates} candidates · RMFL-assisted ranking quality and coverage
         </p>
       </div>
 
       {/* Stat row */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
         <StatCard label="Total Candidates"  value={total_candidates} />
+        <StatCard label="Avg Total Score"    value={`${avgTotal}%`} />
         <StatCard label="Avg Tech Match"    value={`${avgTech}%`} />
         <StatCard label="Avg Semantic"      value={`${avgSem}%`} />
-    
+        <StatCard
+          label="Portfolio Review"
+          value={reviewRequired}
+          sub={`${generatedPortfolios} generated successfully`}
+        />
       </div>
 
       {/* Charts grid */}
@@ -251,8 +292,13 @@ export function AnalyticsView({ rankingData }: { rankingData?: RankingResponse }
 
         {/* JD skill coverage */}
         <ChartCard title={`JD Skill Coverage (${jd_skills.length} skills)`} span={2}>
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={skillCoverage} barSize={20} layout="vertical">
+          {skillCoverage.length === 0 ? (
+            <div className="flex h-[220px] items-center justify-center text-center text-sm text-muted-foreground">
+              No JD skills were extracted. Re-extract the JD or confirm that it contains a skills or technology section.
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={skillCoverage} barSize={20} layout="vertical">
               <XAxis type="number" tick={{ fontSize: 10 }} domain={[0, total_candidates]} />
               <YAxis type="category" dataKey="skill" tick={{ fontSize: 10 }} width={100} />
               <Tooltip
@@ -271,8 +317,9 @@ export function AnalyticsView({ rankingData }: { rankingData?: RankingResponse }
               <Bar dataKey="matched" name="Matched" stackId="a" fill={PALETTE[0]} radius={[0, 0, 0, 0]} />
               <Bar dataKey="missing" name="Missing"  stackId="a" fill={PALETTE[3]} radius={[0, 4, 4, 0]} />
               <Legend wrapperStyle={{ fontSize: 11 }} />
-            </BarChart>
-          </ResponsiveContainer>
+              </BarChart>
+            </ResponsiveContainer>
+          )}
         </ChartCard>
 
         {/* Candidate categories pie */}
@@ -295,6 +342,30 @@ export function AnalyticsView({ rankingData }: { rankingData?: RankingResponse }
                 ))}
               </Pie>
               <Tooltip content={<CustomTooltip />} />
+            </PieChart>
+          </ResponsiveContainer>
+        </ChartCard>
+
+        {/* Portfolio extraction health */}
+        <ChartCard title="Portfolio Output Health">
+          <ResponsiveContainer width="100%" height={220}>
+            <PieChart>
+              <Pie
+                data={portfolioStatusData}
+                dataKey="value"
+                nameKey="name"
+                cx="50%" cy="45%"
+                innerRadius={42}
+                outerRadius={76}
+                label={({ value }) => value > 0 ? String(value) : ""}
+                labelLine={false}
+              >
+                {portfolioStatusData.map((_, i) => (
+                  <Cell key={i} fill={portfolioStatusColors[i]} />
+                ))}
+              </Pie>
+              <Tooltip content={<CustomTooltip />} />
+              <Legend wrapperStyle={{ fontSize: 10 }} />
             </PieChart>
           </ResponsiveContainer>
         </ChartCard>
@@ -379,6 +450,43 @@ export function AnalyticsView({ rankingData }: { rankingData?: RankingResponse }
               </ResponsiveContainer>
             );
           })()}
+        </ChartCard>
+
+        {/* Empty portfolio outputs that need a person to inspect the source URL */}
+        <ChartCard title={`Portfolio Human Review Queue (${reviewQueue.length})`} span={2}>
+          {reviewQueue.length === 0 ? (
+            <div className="flex h-[160px] items-center justify-center text-sm text-green-600 dark:text-green-400">
+              No empty portfolio outputs require review.
+            </div>
+          ) : (
+            <div className="max-h-[220px] space-y-2 overflow-y-auto pr-1">
+              {reviewQueue.map((candidate) => (
+                <div
+                  key={candidate.candidate_id}
+                  className="flex items-start justify-between gap-4 rounded-lg border border-red-200 bg-red-50/60 px-3 py-2.5 dark:border-red-900 dark:bg-red-950/20"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-foreground">
+                      {candidate.candidate_name || candidate.candidate_email || candidate.candidate_id}
+                    </p>
+                    <p className="mt-0.5 text-xs text-red-700 dark:text-red-300">
+                      {candidate.portfolio_error || "No summary or technical skills were returned."}
+                    </p>
+                  </div>
+                  {candidate.portfolio_url && (
+                    <a
+                      href={candidate.portfolio_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="shrink-0 text-xs font-semibold text-primary hover:underline"
+                    >
+                      Review source
+                    </a>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </ChartCard>
 
       </div>

@@ -32,16 +32,16 @@ export function AtsConverterView() {
   };
 
   return (
-    <div className="space-y-4 max-w-2xl">
+    <div className="w-full max-w-4xl mx-auto space-y-6 py-4 md:py-8">
       <div>
-        <h2 className="text-xl font-bold text-foreground">ATS CV Converter</h2>
+        <h2 className="text-2xl font-bold text-foreground">ATS CV Converter</h2>
         <p className="text-sm text-muted-foreground">
           Convert candidate form exports into clean, searchable, ATS-friendly PDF resumes.
         </p>
       </div>
 
-      <div className="rounded-xl border bg-card shadow-card p-5 space-y-5">
-        <div className="rounded-lg border bg-muted/30 p-4 flex gap-3">
+      <div className="rounded-2xl border bg-card shadow-card p-6 md:p-8 space-y-6">
+        <div className="rounded-xl border bg-muted/30 p-5 md:p-6 flex gap-3">
           <FileText className="w-5 h-5 text-teal-600 shrink-0 mt-0.5" />
           <div className="space-y-1">
             <p className="text-sm font-semibold text-foreground">One PDF per candidate</p>

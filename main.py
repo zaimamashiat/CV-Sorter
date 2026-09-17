@@ -87,6 +87,10 @@ GROQ_API_KEY  = os.getenv("GROQ_API_KEY")
 MAX_CHARS_JD  = 4000
 MAX_CHARS_CV  = 2000
 MAX_CHARS_WEB = 3000
+MAX_CHARS_PORTFOLIO_LLM = 2000
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 GITHUB_API    = "https://api.github.com"
 
 SEMANTIC_WEIGHT = 0.7
@@ -634,40 +638,71 @@ _SKILL_BLOCKLIST = {
     "open source", "agile", "scrum",
 }
 
-def llm_summarize_and_extract_skills(text: str, context: str, groq_client) -> tuple:
+def ollama_summarize_and_extract_skills(text: str, context: str) -> tuple:
     if not text or len(text.strip()) < 100:
         return "", []
+    compact_text = re.sub(r"\s+", " ", str(text)).strip()[:MAX_CHARS_PORTFOLIO_LLM]
     prompt = f"""Analyze this {context} portfolio content carefully.
-Return ONLY valid JSON with exactly two fields:
-  "summary": a single paragraph (max 120 words) describing technical skills, notable projects, tools & frameworks, and overall developer profile
-  "skills": a comma-separated string of ONLY genuine technical skills
+Return exactly these two labeled lines:
+SUMMARY: one paragraph (max 120 words) describing technical skills, notable projects, tools and frameworks, and overall developer profile
+SKILLS: a comma-separated list of only genuine technical skills
 
 Rules for "skills":
 - INCLUDE ONLY: programming languages, frameworks/libraries, databases, cloud platforms, DevOps/infrastructure tools
 - DO NOT INCLUDE: competitive programming platforms, social platforms, code editors or IDEs, soft skills
-- "skills" must be a flat comma-separated string, not an array
-- No markdown, no code fences, no extra keys
+- Do not use JSON, markdown, code fences, bullets, or extra labels
 
 Content ({context}):
-{text[:3000]}"""
+{compact_text}"""
     try:
-        resp = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0, max_completion_tokens=500,
+        resp = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0, "num_predict": 350},
+            },
+            timeout=180,
         )
-        raw  = re.sub(r"```json\n?|```\n?",
-                      "", resp.choices[0].message.content.strip()).strip()
-        data = json.loads(raw)
-        return data.get("summary", "").strip(), _parse_groq_skills(data.get("skills", ""))
-    except json.JSONDecodeError:
-        raw = locals().get("raw", "")
-        return (raw[:300] if raw else ""), []
-    except Exception as e:
-        print(f"Groq error ({context}): {e}")
-        return f"Extraction failed: {e}", []
+        resp.raise_for_status()
+        raw = str(resp.json().get("response", "")).strip()
+        summary_match = re.search(
+            r"SUMMARY\s*:\s*(.*?)(?=\s+SKILLS\s*:|$)",
+            raw, flags=re.IGNORECASE | re.DOTALL,
+        )
+        skills_match = re.search(
+            r"SKILLS\s*:\s*(.*)$", raw, flags=re.IGNORECASE | re.DOTALL,
+        )
+        if summary_match:
+            summary = re.sub(r"\s+", " ", summary_match.group(1)).strip()
+            skills_raw = skills_match.group(1).strip() if skills_match else ""
+            return summary, _parse_llm_skills(skills_raw)
 
-def _parse_groq_skills(skills_raw: str) -> List[str]:
+        # Smaller local models sometimes omit the SUMMARY label or put both
+        # fields on one line. Treat everything before SKILLS as the summary.
+        if skills_match:
+            summary = re.sub(r"\s+", " ", raw[:skills_match.start()]).strip(" -:\n")
+            return summary, _parse_llm_skills(skills_match.group(1).strip())
+
+        # Backward-compatible parsing if a model returns JSON despite the prompt.
+        object_match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        if object_match:
+            data = json.loads(object_match.group(0))
+            if isinstance(data, dict):
+                summary_raw = data.get("summary", "")
+                summary = summary_raw.strip() if isinstance(summary_raw, str) else ""
+                return summary, _parse_llm_skills(data.get("skills", ""))
+
+        print(f"Ollama returned an unrecognized format for {context}")
+        return "", []
+    except Exception as e:
+        print(f"Ollama error ({context}): {e}")
+        return "", []
+
+def _parse_llm_skills(skills_raw: Any) -> List[str]:
+    if isinstance(skills_raw, list):
+        skills_raw = ",".join(str(item) for item in skills_raw if isinstance(item, str))
     if not skills_raw or not isinstance(skills_raw, str):
         return []
     skills = []
@@ -897,6 +932,8 @@ class CVRankEntry(BaseModel):
     portfolio_type:      Optional[str]
     portfolio_summary:   Optional[str]
     portfolio_skills:    Optional[List[str]]
+    portfolio_status:    str = "not_provided"
+    portfolio_error:     Optional[str] = None
 
 class RankedCandidate(BaseModel):
     rank:                int
@@ -1001,18 +1038,34 @@ def extract_github_username(url: str) -> Optional[str]:
         return u if u else None
     return None
 
-def fetch_github_repos(username: str, max_repos: int = 8) -> List[Dict]:
+def fetch_github_repos(username: str) -> List[Dict]:
     try:
         headers = {"Accept": "application/vnd.github+json", "User-Agent": "CVScreener/3.0"}
-        r = requests.get(f"{GITHUB_API}/users/{username}/repos",
-                         params={"sort": "updated", "per_page": max_repos},
-                         timeout=10, headers=headers)
-        if r.status_code != 200:
-            return []
-        return [{"name": repo.get("name",""), "description": repo.get("description") or "",
-                 "language": repo.get("language") or "", "topics": repo.get("topics",[]),
-                 "stars": repo.get("stargazers_count",0), "url": repo.get("html_url","")}
-                for repo in r.json()]
+        repos = []
+        page = 1
+        while True:
+            r = requests.get(
+                f"{GITHUB_API}/users/{username}/repos",
+                params={"sort": "updated", "per_page": 100, "page": page},
+                timeout=15, headers=headers,
+            )
+            if r.status_code != 200:
+                print(f"GitHub repositories failed ({username}): HTTP {r.status_code}")
+                break
+            batch = r.json()
+            if not isinstance(batch, list) or not batch:
+                break
+            repos.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return [{"name": repo.get("name", ""),
+                 "description": repo.get("description") or "",
+                 "language": repo.get("language") or "",
+                 "topics": repo.get("topics", []),
+                 "stars": repo.get("stargazers_count", 0),
+                 "url": repo.get("html_url", "")}
+                for repo in repos if repo.get("name")]
     except Exception as e:
         print(f"GitHub API error ({username}): {e}")
         return []
@@ -1021,15 +1074,69 @@ def fetch_github_readme(username: str, repo: str) -> str:
     try:
         r = requests.get(f"{GITHUB_API}/repos/{username}/{repo}/readme",
                          headers={"Accept": "application/vnd.github.raw",
-                                  "User-Agent": "CVScreener/3.0"}, timeout=8)
-        return r.text[:1500] if r.status_code == 200 else ""
-    except Exception:
+                                  "User-Agent": "CVScreener/3.0"}, timeout=12)
+        return r.text[:6000] if r.status_code == 200 else ""
+    except Exception as e:
+        print(f"GitHub README error ({username}/{repo}): {e}")
         return ""
 
-def scrape_portfolio(url: str, groq_client, ner_model=None) -> Dict:
+def _chunk_text_blocks(blocks: List[str], limit: int = MAX_CHARS_PORTFOLIO_LLM) -> List[str]:
+    chunks, current = [], ""
+    for block in blocks:
+        remaining = block.strip()
+        while remaining:
+            room = limit - len(current) - (2 if current else 0)
+            if room <= 0:
+                chunks.append(current)
+                current = ""
+                room = limit
+            piece, remaining = remaining[:room], remaining[room:]
+            current = f"{current}\n\n{piece}" if current else piece
+            if len(current) >= limit:
+                chunks.append(current)
+                current = ""
+    if current:
+        chunks.append(current)
+    return chunks
+
+def summarize_github_readmes(username: str, readmes: List[Dict]) -> tuple:
+    blocks = [f"Repository: {item['name']}\nREADME:\n{item['text']}" for item in readmes]
+    summaries, all_skills = [], []
+    chunks = _chunk_text_blocks(blocks)
+    for index, chunk in enumerate(chunks, start=1):
+        summary, skills = ollama_summarize_and_extract_skills(
+            chunk, f"GitHub README batch {index}/{len(chunks)} for {username}"
+        )
+        if summary:
+            summaries.append(summary)
+        all_skills.extend(skills)
+
+    reduction_round = 1
+    while len("\n".join(summaries)) > MAX_CHARS_PORTFOLIO_LLM and len(summaries) > 1:
+        reduced = []
+        for index, chunk in enumerate(_chunk_text_blocks(summaries), start=1):
+            summary, skills = ollama_summarize_and_extract_skills(
+                chunk, f"GitHub summary reduction {reduction_round}.{index} for {username}",
+            )
+            reduced.append(summary or chunk[:500])
+            all_skills.extend(skills)
+        summaries = reduced
+        reduction_round += 1
+
+    combined = "\n".join(summaries)
+    if not combined:
+        return "", list(dict.fromkeys(all_skills))
+    final_summary, final_skills = ollama_summarize_and_extract_skills(
+        combined, f"complete GitHub portfolio for {username}"
+    )
+    all_skills.extend(final_skills)
+    return final_summary or combined[:1000], list(dict.fromkeys(all_skills))
+
+def scrape_portfolio(url: str, ner_model=None) -> Dict:
     clean = normalize_url(url)
     base  = {"url": clean or url, "type": "unknown",
-             "summary": "", "skills_detected": [], "repos": None, "error": None}
+             "summary": "", "skills_detected": [], "repos": None,
+             "readmes_extracted": 0, "error": None}
     if not clean:
         base["error"] = "Invalid URL"; return base
     ptype = detect_portfolio_type(clean)
@@ -1041,33 +1148,39 @@ def scrape_portfolio(url: str, groq_client, ner_model=None) -> Dict:
                 base["error"] = "Cannot extract GitHub username"; return base
             repos = fetch_github_repos(username)
             base["repos"] = repos
-            readme_texts = []
-            for repo in sorted(repos, key=lambda r: r["stars"], reverse=True)[:3]:
+            readmes = []
+            for repo in repos:
                 txt = fetch_github_readme(username, repo["name"])
                 if txt:
-                    readme_texts.append(f"[{repo['name']}]\n{txt}")
-                time.sleep(0.3)
-            repo_lines = "\n".join(
-                f"{r['name']} ({r['language']}): {r['description']}"
-                for r in repos if r.get("description"))
-            combined = (f"GitHub: {username}\n\nRepos:\n{repo_lines}\n\nREADMEs:\n"
-                        + "\n\n".join(readme_texts))
-            base["summary"], base["skills_detected"] = \
-                llm_summarize_and_extract_skills(combined, "GitHub", groq_client)
+                    readmes.append({"name": repo["name"], "text": txt})
+            base["readmes_extracted"] = len(readmes)
+            print(f"GitHub {username}: extracted {len(readmes)}/{len(repos)} public READMEs")
+            if readmes:
+                base["summary"], base["skills_detected"] = \
+                    summarize_github_readmes(username, readmes)
+            elif repos:
+                repo_lines = "\n".join(
+                    f"{r['name']} ({r['language']}): {r['description']}" for r in repos
+                )
+                base["summary"], base["skills_detected"] = \
+                    ollama_summarize_and_extract_skills(repo_lines, "GitHub repositories")
+                base["error"] = "No repository README files were accessible"
+            else:
+                base["error"] = "No public GitHub repositories found or API limit reached"
         elif ptype == "linkedin":
             text = scrape_website_text(clean)
             if text.startswith("ERROR") or len(text.strip()) < 200:
                 base["error"] = "LinkedIn blocked scraping (expected)"
             else:
                 base["summary"], base["skills_detected"] = \
-                    llm_summarize_and_extract_skills(text, "LinkedIn", groq_client)
+                    ollama_summarize_and_extract_skills(text, "LinkedIn")
         else:
             text = scrape_website_text(clean)
             if text.startswith("ERROR"):
                 base["error"] = text; base["summary"] = "Could not fetch website"
             else:
                 base["summary"], base["skills_detected"] = \
-                    llm_summarize_and_extract_skills(text, "portfolio website", groq_client)
+                    ollama_summarize_and_extract_skills(text, "portfolio website")
     except Exception as e:
         base["error"] = str(e); base["summary"] = f"Extraction failed: {e}"
     return base
@@ -1192,7 +1305,7 @@ def call_groq(prompt: str, groq_client, retries=3, delay=3) -> str:
     for attempt in range(retries):
         try:
             resp = groq_client.chat.completions.create(
-                model="llama-3.1-8b-instant",
+                model=GROQ_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0, max_completion_tokens=1024,
             )
@@ -1517,7 +1630,7 @@ async def extract_portfolio_endpoint(url: str = Form(...)):
     cleaned = normalize_url(url)
     if not cleaned:
         raise HTTPException(400, "Invalid or empty URL")
-    return scrape_portfolio(cleaned, models["groq"])
+    return scrape_portfolio(cleaned)
 
 @app.post("/rank-cvs", response_model=RankingResponse)
 async def rank_cvs(
@@ -1647,7 +1760,7 @@ async def rank_cvs(
             print(f"Scraping {len(unique)} unique portfolio URLs…")
             for u in unique:
                 print(f"  → {u}")
-                port_cache[u] = scrape_portfolio(u, models["groq"])
+                port_cache[u] = scrape_portfolio(u)
                 time.sleep(2)
 
         # ── 4. JD keyword tokenization ─────────────────────────────────────
@@ -1735,6 +1848,15 @@ async def rank_cvs(
             candidate_phone = next((str(meta[c]).strip() for c in PHONE_COL_CANDIDATES
                                     if c in meta and str(meta[c]).strip()), "")
 
+            if not port_url:
+                portfolio_status = "not_provided"
+            elif not extract_portfolios:
+                portfolio_status = "not_processed"
+            elif port_data.get("summary") or port_data.get("skills_detected"):
+                portfolio_status = "generated"
+            else:
+                portfolio_status = "empty"
+
             rows.append({
                 "rank":                0,
                 "candidate_id":        cid,
@@ -1762,6 +1884,8 @@ async def rank_cvs(
                 "portfolio_type":      port_data.get("type"),
                 "portfolio_summary":   port_data.get("summary") or None,
                 "portfolio_skills":    port_data.get("skills_detected") or None,
+                "portfolio_status":    portfolio_status,
+                "portfolio_error":     port_data.get("error") or None,
             })
 
         # ── 8. Sort & rank ─────────────────────────────────────────────────

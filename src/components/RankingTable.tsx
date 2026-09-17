@@ -3,7 +3,7 @@ import { ScoreBadge } from "./ScoreBadge";
 import { SkillTag } from "./SkillTag";
 import { CandidateModal } from "./CandidateModal";
 import { Badge } from "@/components/ui/badge";
-import { ChevronUp, ChevronDown, Eye, Trash2 } from "lucide-react";
+import { ChevronUp, ChevronDown, ExternalLink, Eye, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // ── RMFL criterion breakdown entry ───────────────────────────────────────────
@@ -33,6 +33,8 @@ export interface ApiCandidate {
   portfolio_type:       string | null;
   portfolio_summary:    string | null;
   portfolio_skills:     string[] | null;
+  portfolio_status:     "generated" | "empty" | "not_processed" | "not_provided";
+  portfolio_error:      string | null;
   // ── RMFL fields ────────────────────────────────────────────────────────────
   criteria_scores:      Record<string, number>              | null;
   learned_weights:      Record<string, number>              | null;
@@ -77,6 +79,22 @@ export function RankingTable({ candidates, jdTitle, onDelete }: RankingTableProp
 
   // Whether ANY candidate in the list has RMFL data — controls column visibility
   const hasCriteriaData = localList.some((c) => c.criteria_total != null);
+
+  const portfolioStatus = (c: ApiCandidate) => {
+    if (c.portfolio_status) return c.portfolio_status;
+    if (!c.portfolio_url) return "not_provided";
+    return c.portfolio_summary || (c.portfolio_skills?.length ?? 0) > 0
+      ? "generated"
+      : "empty";
+  };
+
+  const portfolioStatusView = (c: ApiCandidate) => {
+    const status = portfolioStatus(c);
+    if (status === "generated") return { label: "Generated", className: "border-green-200 bg-green-50 text-green-700 dark:border-green-900 dark:bg-green-950/40 dark:text-green-300" };
+    if (status === "empty") return { label: "Empty — Review", className: "border-red-200 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300" };
+    if (status === "not_processed") return { label: "Not processed", className: "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300" };
+    return { label: "Not provided", className: "border-border bg-muted/40 text-muted-foreground" };
+  };
 
   const displayName = (c: ApiCandidate) => {
     if (c.candidate_name?.trim()) return c.candidate_name.trim();
@@ -127,7 +145,8 @@ export function RankingTable({ candidates, jdTitle, onDelete }: RankingTableProp
         displayName(c).toLowerCase().includes(q) ||
         (c.category?.toLowerCase() ?? "").includes(q) ||
         (c.candidate_email?.toLowerCase() ?? "").includes(q) ||
-        (displayAreaOfInterest(c)?.toLowerCase() ?? "").includes(q)
+        (displayAreaOfInterest(c)?.toLowerCase() ?? "").includes(q) ||
+        portfolioStatusView(c).label.toLowerCase().includes(q)
       );
     })
     .sort((a, b) => {
@@ -222,6 +241,9 @@ export function RankingTable({ candidates, jdTitle, onDelete }: RankingTableProp
 
                   <th className="text-left px-4 py-3 font-semibold text-muted-foreground text-xs uppercase tracking-wide">
                     Matched Skills
+                  </th>
+                  <th className="text-left px-4 py-3 font-semibold text-muted-foreground text-xs uppercase tracking-wide">
+                    Portfolio Output
                   </th>
                   <th className="px-4 py-3 w-28" />
                 </tr>
@@ -338,6 +360,31 @@ export function RankingTable({ candidates, jdTitle, onDelete }: RankingTableProp
                         )}
                         {(c.matched_skills ?? []).length === 0 && (
                           <span className="text-[11px] text-muted-foreground">—</span>
+                        )}
+                      </div>
+                    </td>
+
+                    {/* Portfolio generation/review status */}
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2 whitespace-nowrap">
+                        <Badge
+                          variant="outline"
+                          className={cn("text-[11px] font-semibold", portfolioStatusView(c).className)}
+                          title={c.portfolio_error ?? undefined}
+                        >
+                          {portfolioStatusView(c).label}
+                        </Badge>
+                        {c.portfolio_url && (
+                          <a
+                            href={c.portfolio_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-primary hover:text-primary/80"
+                            title="Open portfolio for human review"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                          </a>
                         )}
                       </div>
                     </td>
